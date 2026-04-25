@@ -232,12 +232,31 @@ static void back_cb(lv_event_t *e)
 }
 
 /* ------------------------------------------------------------------ */
-/* Live temp/resistance readout                                        */
+/* Live temp/resistance readout + idle-timeout check                   */
+/*                                                                      */
+/* The same 200 ms timer that refreshes the live readout also enforces  */
+/* an inactivity timeout: if nothing has been touched for SPLASH_TIME   */
+/* seconds, drop back to the gauge.  Per Jeff (2026-04-24): "have the   */
+/* settings screen time out after whatever splash time is (easier)" --  */
+/* one knob controls how long both transient screens linger.  Every     */
+/* +/- tap, buzzer toggle, and BACK press counts as input-device        */
+/* activity and resets lv_disp_get_inactive_time(), so a user actively  */
+/* poking at the screen never times out.                                */
 /* ------------------------------------------------------------------ */
 static void live_tick(lv_timer_t *t)
 {
     (void)t;
     if (!s_live_lbl) return;
+
+    /* Idle timeout: same as the splash-hold setting (1-10 s). */
+    uint32_t idle_ms    = lv_disp_get_inactive_time(NULL);
+    uint32_t timeout_ms = (uint32_t)Settings_GetSplashTimeS() * 1000U;
+    if (idle_ms > timeout_ms) {
+        ESP_LOGI(TAG, "idle %u ms > %u ms, leaving settings",
+                 (unsigned)idle_ms, (unsigned)timeout_ms);
+        back_cb(NULL);   /* tears down timer + state, swaps to gauge */
+        return;
+    }
 
     float tF = TempSender_GetTempF();
     float r  = TempSender_GetResistanceOhms();
@@ -574,6 +593,11 @@ void show_settings(void)
     refresh_all();
     live_tick(NULL);
     s_live_timer = lv_timer_create(live_tick, 200, NULL);
+
+    /* Reset the LVGL inactivity counter so the idle-timeout starts
+     * fresh from this moment instead of inheriting whatever idle time
+     * has accumulated since the last touch in another screen. */
+    lv_disp_trig_activity(NULL);
 
     /* Swap to the freshly-built settings screen. auto_del=true frees
      * the previous gauge screen, so no leak and no state carried over. */
