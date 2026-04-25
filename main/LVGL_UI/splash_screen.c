@@ -7,12 +7,18 @@
  *   2) done_cb   -- runs once at the very end, calls show_gauge()
  */
 #include "lvgl.h"
+#include "esp_log.h"
 #include "splash_screen.h"
 #include "display_gauge.h"
 #include "splash_img.h"
+#include "Settings.h"
 
-/* Timings (milliseconds) */
-#define SPLASH_HOLD_MS     2500   /* full-opacity hold time                */
+static const char *TAG = "SPLASH";
+
+/* Timings (milliseconds). The full-opacity hold duration is now driven
+ * by the user-adjustable Settings_GetSplashTimeS() setting (1-10 s) so
+ * Jeff can tune how long the boot logo lingers. Fade duration and step
+ * cadence remain compile-time -- they're cosmetic, not user-facing. */
 #define SPLASH_FADE_MS      400   /* fade-out duration after the hold     */
 #define SPLASH_FADE_STEP_MS  25   /* fade animation tick period           */
 
@@ -23,7 +29,9 @@ static lv_timer_t *s_fade_timer = NULL;
 static void splash_done_cb(lv_timer_t *t)
 {
     (void)t;
-    /* show_gauge() calls lv_obj_clean(scr) which destroys our image. */
+    /* show_gauge() builds a fresh screen from scratch and swaps it in,
+     * which destroys our splash image. */
+    ESP_LOGI(TAG, "splash_done_cb -> show_gauge()");
     show_gauge();
     s_splash_img = NULL;
     s_fade_timer = NULL;
@@ -80,8 +88,10 @@ void show_splash(void)
     lv_obj_align(s_splash_img, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_img_opa(s_splash_img, LV_OPA_COVER, 0);
 
-    /* After SPLASH_HOLD_MS, begin fading out. */
-    lv_timer_t *hold = lv_timer_create(splash_hold_done_cb,
-                                       SPLASH_HOLD_MS, NULL);
+    /* After the user-configured splash hold (Settings_GetSplashTimeS,
+     * 1-10 s), begin fading out. */
+    uint32_t hold_ms = (uint32_t)Settings_GetSplashTimeS() * 1000U;
+    ESP_LOGI(TAG, "splash hold = %u ms", (unsigned)hold_ms);
+    lv_timer_t *hold = lv_timer_create(splash_hold_done_cb, hold_ms, NULL);
     lv_timer_set_repeat_count(hold, 1);
 }

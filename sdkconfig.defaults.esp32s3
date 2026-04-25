@@ -6,3 +6,17 @@ CONFIG_SPIRAM_SPEED_80M=y
 # the Frame Buffer is allocated from the PSRAM and fetched by EDMA
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
+
+# RGB panel flush strategy:
+# - Single framebuffer (not DOUBLE_FB) so BOUNCE_BUFFER can be enabled
+#   (they're mutually exclusive per main/Kconfig.projbuild).
+# - BOUNCE_BUFFER routes RGB DMA through internal SRAM instead of reading
+#   directly from PSRAM, so the panel's scanline fetch can't starve when
+#   other tasks (touch I2C, LVGL render, ADC sampling) contend for PSRAM
+#   bandwidth. That bandwidth contention was the root cause of the
+#   "screen shifts right on button press" symptom -- the DMA momentarily
+#   underran and the panel latched a shifted row.
+# - AVOID_TEAR_EFFECT_WITH_SEM pairs LVGL's flush with vsync so a partial
+#   mid-flush buffer never gets displayed.
+CONFIG_EXAMPLE_USE_BOUNCE_BUFFER=y
+CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM=y

@@ -1,14 +1,14 @@
 /*
- * Temp_Sender.c -- GM TS6 coolant temp sender via ADS1115 over I2C.
+ * Temp_Sender.c -- Prosport PSOWTS-JPN coolant temp sender via ADS1115
+ * over I2C.
  *
  * Uses the board's existing I2C bus (I2C_NUM_0 at 400 kHz, set up by
  * I2C_Driver). ADS1115 default address 0x48, channel AIN0 single-ended.
  *
- * The GM TS6 curve below is the long-documented factory GM coolant
- * temp sender resistance table. It was used on most GM cars from the
- * mid-60s through the 80s, and it matches the sender O'Reilly sells
- * as the Standard TS6. If you swap senders later, only TS6_CURVE[]
- * needs updating.
+ * The PROSPORT_CURVE[] table is the 7-point factory spec from Prosport
+ * (104/140/176/212/248/284/302 F). If you swap to a different sender
+ * later, only that table needs to change. User-tunable offset in
+ * Settings lets you bias the final reading without touching the curve.
  */
 #include "Temp_Sender.h"
 
@@ -23,15 +23,12 @@
 #include "I2C_Driver.h"      /* i2c bus handle / I2C_MASTER_NUM, etc. */
 #include "display_gauge.h"   /* set_gauge_temp_f */
 #include "Buzzer.h"          /* Buzzer_On / Buzzer_Off                */
+#include "Settings.h"        /* overheat trip, temp offset, buzzer    */
 
-/* Audible alarm (fires for BOTH sender-fault and overheat conditions).
- *   0 = visual-only (banner flashes, needle pegs high or shows real
- *       temp, no sound). Use this while bench-testing so you don't
- *       hate your life and your family. Default for now.
- *   1 = also chirp the buzzer: ~150 ms on, ~850 ms off, repeating,
- *       for as long as any alarm is active. Flip this to 1 right
- *       before final install in the car. */
-#define ALARM_BUZZER_ENABLE    0
+/* The buzzer enable lives in Settings (NVS-backed, user-toggleable
+ * from the on-screen SETTINGS page) instead of a compile-time flag.
+ * This lets you bench-test silently and then arm the buzzer without
+ * a re-flash when the gauge goes in the car. */
 
 static const char *TAG = "TempSender";
 
@@ -63,37 +60,31 @@ static const char *TAG = "TempSender";
  *                             little margin below that for "real hot".
  *   We require CONSEC_FAULT_SAMPLES bad reads in a row before raising
  *   the alarm, so a single noise spike won't trip it. */
-#define V_OPEN_THRESH          2.95f
+#define V_OPEN_THRESH          3.20f
 #define V_SHORT_THRESH         0.05f
 #define CONSEC_FAULT_SAMPLES   3
 
-/* Overheat alarm thresholds (F).
- *   Trip at  OVERHEAT_TRIP_F   -- flash "OVERHEAT" and sound buzzer.
- *   Clear at OVERHEAT_CLEAR_F  -- 4 F hysteresis so it doesn't flap
- *                                 at the threshold. */
-#define OVERHEAT_TRIP_F        212.0f
-#define OVERHEAT_CLEAR_F       208.0f
+/* Overheat alarm thresholds (F) now live in Settings (NVS). They are
+ * read live each sample tick via Settings_GetOverheatTripF() and
+ * Settings_GetOverheatClearF() so changes from the on-screen settings
+ * page take effect immediately, no reboot. The clear threshold is
+ * always trip - SETTINGS_HYST_F (4 F) for consistent hysteresis. */
 
 /* ------------------------------------------------------------------ */
-/* GM TS6 resistance curve                                             */
+/* Prosport PSOWTS-JPN resistance curve                                */                                          
 /* ------------------------------------------------------------------ */
 typedef struct { float ohms; float temp_f; } ts_point_t;
-
-static const ts_point_t TS6_CURVE[] = {
-    /* ohms     F      (NTC: resistance drops as temp rises)          */
-    { 3400.0f,  70.0f  },
-    { 1800.0f,  90.0f  },
-    { 1365.0f, 100.0f  },  /* factory spec cold reference             */
-    {  800.0f, 130.0f  },
-    {  450.0f, 160.0f  },
-    {  210.0f, 180.0f  },  /* factory "normal" operating temp         */
-    {  140.0f, 200.0f  },
-    {   90.0f, 220.0f  },
-    {   65.0f, 240.0f  },
-    {   55.0f, 260.0f  },  /* factory spec hot reference              */
-    {   45.0f, 280.0f  },
+static const ts_point_t PROSPORT_CURVE[] = {
+    /* Prosport PSOWTS-JPN — factory spec, 7 points, 104-302 F */
+    { 5830.0f, 104.0f },
+    { 3020.0f, 140.0f },
+    { 1670.0f, 176.0f },
+    {  975.0f, 212.0f },   /* boiling */
+    {  599.0f, 248.0f },
+    {  386.0f, 284.0f },
+    {  316.0f, 302.0f },
 };
-#define TS6_POINTS (sizeof(TS6_CURVE) / sizeof(TS6_CURVE[0]))
+#define PROSPORT_POINTS (sizeof(PROSPORT_CURVE) / sizeof(PROSPORT_CURVE[0]))
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -165,31 +156,63 @@ static float volts_to_resistance(float vadc)
     return PULLUP_OHMS * vadc / (VCC_VOLTS - vadc);
 }
 
-/* Piecewise-linear interpolation through TS6_CURVE. Curve is in
- * descending-ohm order so we scan high->low until we bracket r. */
+/* --- Cold-end Beta extrapolation -----------------------------------
+ * Prosport's published curve stops at 104 F / 5830 ohm. Below that, a
+ * flat clamp made ambient readings useless (gauge stuck at 104 F at
+ * room temp). Instead, model the NTC with the standard Beta equation
+ *   R(T) = R0 * exp( Beta * (1/T - 1/T0) )
+ * where Beta is derived once from the two coldest factory points:
+ *   5830 ohm @ 313.15 K (104 F)  and  3020 ohm @ 333.15 K (140 F)
+ *   Beta = ln(5830/3020) / (1/313.15 - 1/333.15) ~= 3432 K
+ * Accuracy is ~+/- a few F down to room temp, softer near freezing,
+ * but a whole lot better than a pinned 104 F. We'll replace this with
+ * measured ice-water / ambient points in the table later and the
+ * Beta branch will stop firing. */
+#define BETA_R0_OHMS       5830.0f        /* PROSPORT_CURVE[0].ohms  */
+#define BETA_T0_KELVIN      313.15f       /* 40 C == 104 F           */
+#define BETA_K             3432.0f        /* fit from first two pts  */
+
+/* Piecewise-linear interpolation through PROSPORT_CURVE. Curve is in
+ * descending-ohm order; scan high->low until we bracket r, then linearly
+ * interpolate temp_f. Above the coldest table point we extrapolate with
+ * the NTC Beta model (see above); below the hottest point we clamp. */
 static float resistance_to_temp_f(float r)
 {
-    if (r >= TS6_CURVE[0].ohms)            return TS6_CURVE[0].temp_f;
-    if (r <= TS6_CURVE[TS6_POINTS-1].ohms) return TS6_CURVE[TS6_POINTS-1].temp_f;
+    const size_t n = sizeof(PROSPORT_CURVE) / sizeof(PROSPORT_CURVE[0]);
 
-    for (size_t i = 0; i < TS6_POINTS - 1; ++i) {
-        float r_hi = TS6_CURVE[i].ohms;
-        float r_lo = TS6_CURVE[i+1].ohms;
+    /* Cold side: extrapolate instead of clamping at 104 F. */
+    if (r > PROSPORT_CURVE[0].ohms) {
+        /* 1/T = 1/T0 + ln(R/R0) / Beta  */
+        float inv_T = (1.0f / BETA_T0_KELVIN) + logf(r / BETA_R0_OHMS) / BETA_K;
+        if (inv_T <= 0.0f) return -40.0f;        /* guard: pathological r */
+        float T_K = 1.0f / inv_T;
+        float T_C = T_K - 273.15f;
+        return T_C * 9.0f / 5.0f + 32.0f;
+    }
+
+    /* Hot side: clamp at the top of the table. */
+    if (r <= PROSPORT_CURVE[n - 1].ohms) return PROSPORT_CURVE[n - 1].temp_f;
+
+    /* Inside the table: linear interpolate between bracketing points. */
+    for (size_t i = 0; i < n - 1; i++) {
+        float r_hi = PROSPORT_CURVE[i].ohms;
+        float r_lo = PROSPORT_CURVE[i + 1].ohms;
         if (r <= r_hi && r >= r_lo) {
-            float t_hi = TS6_CURVE[i].temp_f;
-            float t_lo = TS6_CURVE[i+1].temp_f;
-            float frac = (r_hi - r) / (r_hi - r_lo);
-            return t_hi + frac * (t_lo - t_hi);
+            float t_hi = PROSPORT_CURVE[i].temp_f;
+            float t_lo = PROSPORT_CURVE[i + 1].temp_f;
+            float frac = (r - r_lo) / (r_hi - r_lo);
+            return t_lo + frac * (t_hi - t_lo);
         }
     }
-    return 180.0f;   /* unreachable */
+    return PROSPORT_CURVE[n - 1].temp_f;  /* fallback, shouldn't hit */
 }
-
 /* ------------------------------------------------------------------ */
 /* Background sampling task                                            */
 /* ------------------------------------------------------------------ */
 #define SAMPLE_PERIOD_MS   100      /* 10 Hz */
-#define AVG_WINDOW         8        /* ~0.8 s smoothing */
+#define AVG_WINDOW         4        /* ~0.4 s smoothing -- snappy enough
+                                       for bench dunk tests while still
+                                       killing ADC tick-to-tick noise.  */
 
 static void temp_task(void *arg)
 {
@@ -201,7 +224,7 @@ static void temp_task(void *arg)
 
     int  fault_streak     = 0;      /* consecutive bad samples           */
     bool fault_latched    = false;  /* sender open/short alarm active?   */
-    bool overheat_latched = false;  /* coolant >= OVERHEAT_TRIP_F ?      */
+    bool overheat_latched = false;  /* coolant >= Settings trip value?   */
     int  buzzer_tick      = 0;      /* for chirp timing (100 ms units)   */
 
     for (;;) {
@@ -231,7 +254,12 @@ static void temp_task(void *arg)
             /* --- Normal reading path ---------------------------- */
             if (!fault_latched) {
                 float r  = volts_to_resistance(v);
-                float tF = resistance_to_temp_f(r);
+                /* User-adjustable offset: applied BEFORE the smoothing
+                 * window and BEFORE the overheat check so that dialing
+                 * +3F in settings shifts both the displayed number and
+                 * the trip threshold by the same amount -- they can't
+                 * get out of sync. */
+                float tF = resistance_to_temp_f(r) + Settings_GetTempOffsetF();
 
                 window[widx] = tF;
                 widx = (widx + 1) % AVG_WINDOW;
@@ -248,14 +276,18 @@ static void temp_task(void *arg)
             /* Only meaningful when the sender reading is trustworthy.
              * If a fault is latched the needle is pegged at 260 and we
              * can't tell what the engine is actually doing -- treat it
-             * as a sensor problem only and don't double-alarm. */
+             * as a sensor problem only and don't double-alarm.
+             * Trip/clear are read every tick from Settings so the user
+             * can adjust the threshold live from the on-screen UI. */
             if (!fault_latched) {
-                if (!overheat_latched && s_temp_f >= OVERHEAT_TRIP_F) {
+                float trip_f  = Settings_GetOverheatTripF();
+                float clear_f = Settings_GetOverheatClearF();
+                if (!overheat_latched && s_temp_f >= trip_f) {
                     overheat_latched = true;
                     buzzer_tick      = 0;
                     ESP_LOGW(TAG, "OVERHEAT: %.1f F (trip=%.0f)",
-                             s_temp_f, OVERHEAT_TRIP_F);
-                } else if (overheat_latched && s_temp_f <= OVERHEAT_CLEAR_F) {
+                             s_temp_f, trip_f);
+                } else if (overheat_latched && s_temp_f <= clear_f) {
                     overheat_latched = false;
                     ESP_LOGI(TAG, "overheat cleared at %.1f F", s_temp_f);
                 }
@@ -276,12 +308,14 @@ static void temp_task(void *arg)
                 set_gauge_alarm(false, NULL);
             }
 
-#if ALARM_BUZZER_ENABLE
-            /* Chirp pattern while any alarm is active: 150 ms ON,
-             * 850 ms OFF, repeating every 1 s. At 100 ms/sample that's
-             * tick 0-1 on, tick 2-9 off. Annoying enough to notice,
-             * not so bad you'll unplug the screen in frustration. */
-            if (fault_latched || overheat_latched) {
+            /* Chirp pattern while any alarm is active AND the user has
+             * the buzzer enabled in Settings: 150 ms ON, 850 ms OFF,
+             * repeating every 1 s. At 100 ms/sample that's tick 0-1 on,
+             * tick 2-9 off. Annoying enough to notice, not so bad
+             * you'll unplug the screen in frustration. Toggling the
+             * setting mid-alarm stops the chirp on the next tick.     */
+            if (Settings_GetBuzzerEnabled() &&
+                (fault_latched || overheat_latched)) {
                 int phase = buzzer_tick % 10;
                 if (phase == 0)      Buzzer_On();
                 else if (phase == 2) Buzzer_Off();
@@ -290,7 +324,6 @@ static void temp_task(void *arg)
                 Buzzer_Off();
                 buzzer_tick = 0;
             }
-#endif
         } else {
             ESP_LOGW(TAG, "ADS1115 read failed");
             /* I2C bus hiccup, not a sender fault -- don't alarm. */

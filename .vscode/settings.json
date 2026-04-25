@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.portWin": "COM3",
+  "idf.portWin": "COM4",
   "files.associations": {
     "vernon_st7701s.h": "c",
     "gpio.h": "c",

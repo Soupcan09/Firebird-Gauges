@@ -1,19 +1,21 @@
 /*
- * Temp_Sender.h -- GM TS6 coolant temperature sender driver.
+ * Temp_Sender.h -- Prosport PSOWTS-JPN coolant temperature sender driver.
  *
- * Reads a GM TS6 (NTC thermistor) through an ADS1115 16-bit I2C ADC.
- * The ADS1115 sits on the board's I2C bus (same SCL/SDA as touch/IMU/RTC,
- * at address 0x48 by default).
+ * Reads a Prosport PSOWTS-JPN (NTC thermistor, two-wire) through an
+ * ADS1115 16-bit I2C ADC. The ADS1115 sits on the board's I2C bus
+ * (same SCL/SDA as touch/IMU/RTC, at address 0x48 by default).
  *
  * Circuit:
  *   3.3V --[ 1kohm pullup ]--+-- ADS1115 A0
  *                            |
- *                          [ TS6 ]
+ *                       [ Prosport ]
  *                            |
  *                           GND  (engine block / chassis)
  *
- * Cold sender is ~1365 ohm  => ~1.90 V at ADC input (100 F)
- * Hot  sender is    ~55 ohm => ~0.17 V at ADC input (260 F)
+ * Factory spec (7 points, see Temp_Sender.c PROSPORT_CURVE[]):
+ *   104 F -> 5830 ohm  (~2.09 V at ADC)
+ *   212 F ->  975 ohm  (~1.62 V)
+ *   302 F ->  316 ohm  (~0.79 V)
  *
  * Call TempSender_Init() once from app_main after Wireless/LVGL init,
  * then a background task periodically pushes readings into

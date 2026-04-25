@@ -1,5 +1,7 @@
 # Name,     Type, SubType, Offset,   Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap,,,,
+# Bumped factory 3M -> 5M to fit two gauge-face PNGs (CLASSIC + COMPACT)
+# baked into the binary.  16MB chip; flash_test auto-places after factory.
 nvs,        data, nvs,      0x9000,  0x6000,
-factory,0,0,        0x10000, 3M,
+factory,0,0,        0x10000, 5M,
 flash_test, data, fat,      ,        528K,

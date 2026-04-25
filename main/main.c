@@ -14,7 +14,9 @@
 #include "display_gauge.h"
 #include "splash_screen.h"
 #include "Temp_Sender.h"
+#include "Settings.h"
 #include "Wireless.h"
+#include "esp_log.h"
 
 void Driver_Loop(void *parameter)
 {
@@ -45,7 +47,7 @@ void Driver_Init(void)
         0);
 }
 void app_main(void)
-{   
+{  
     Wireless_Init();
     Driver_Init();
 
@@ -55,8 +57,9 @@ void app_main(void)
     LVGL_Init();
 /********************* Demo *********************/
     // Lvgl_Example1();  // Waveshare demo UI (disabled)
+    Settings_Init();      // Load NVS-backed user prefs (trip, offset, bright, buzzer)
     show_splash();        // Boot splash -> auto-transitions to show_gauge()
-    TempSender_Init();    // ADS1115 + TS6 sender -> drives the needle
+    TempSender_Init();    // ADS1115 + Prosport sender -> drives the needle
 
     // lv_demo_widgets();
     // lv_demo_keypad_encoder();
